@@ -50,6 +50,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Improved extraction observability in `WebExtractionAgent` with lifecycle logs for initialization, extraction start/completion, keyword extraction, and fetch timing.
+- Added safe log formatting helpers that sanitize URLs (drop query params/fragments) and limit logged keyword input to a short preview.
+- Standardized short-content warnings to structured logging format for easier filtering in log pipelines.
+
 ### Planned Features
 - [ ] Support for more LLM providers (OpenAI, Anthropic, etc.)
 - [ ] Batch processing for multiple URLs
