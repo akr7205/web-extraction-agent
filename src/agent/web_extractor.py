@@ -6,7 +6,7 @@ import logging
 from collections import Counter
 from typing import Optional, Dict, Any, List
 from datetime import datetime
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -46,6 +46,12 @@ class WebExtractionAgent:
         self.keyword_extractor = KeywordExtractor()
         self.session = requests.Session()
         self.session.headers.update({'User-Agent': USER_AGENT})
+        logger.debug(
+            "Initializing WebExtractionAgent (use_llm=%s, global_use_llm=%s, log_level=%s)",
+            use_llm,
+            USE_LLM,
+            LOG_LEVEL
+        )
         
         # Initialize LLM extractor if enabled
         self.llm_extractor = None
@@ -108,6 +114,12 @@ class WebExtractionAgent:
         """
         start_time = time.time()
         errors = []
+        logger.info(
+            "Starting extraction url=%s profile=%s raw_html_supplied=%s",
+            self._loggable_url(url),
+            extraction_profile,
+            bool(raw_html)
+        )
         
         try:
             # Validate input
@@ -124,6 +136,7 @@ class WebExtractionAgent:
                 logger.debug("Using provided HTML content")
             else:
                 html_content = self._fetch_html(url)
+            logger.debug("HTML acquired for %s (%s chars)", self._loggable_url(url), len(html_content))
             
             # Parse and clean HTML
             soup = self._parse_and_clean(html_content, extraction_profile)
@@ -133,6 +146,14 @@ class WebExtractionAgent:
             content = self._extract_content(soup, extraction_profile)
             entities = self._extract_entities(content)
             structured_sections = self._extract_structured_sections(soup)
+            logger.debug(
+                "Content parsed for %s (title_len=%s, content_len=%s, entities=%s, sections=%s)",
+                self._loggable_url(url),
+                len(title),
+                len(content),
+                len(entities),
+                len(structured_sections)
+            )
             auto_keywords = self._auto_select_keywords(content)
             keyword_snapshot = self._run_keyword_extraction(
                 soup,
@@ -156,8 +177,22 @@ class WebExtractionAgent:
             # Check for minimum content
             if len(content) < MIN_CONTENT_LENGTH:
                 errors.append(f"Content too short: {len(content)} chars (min: {MIN_CONTENT_LENGTH})")
+                logger.warning(
+                    "Extraction content below threshold for %s (%s < %s)",
+                    self._loggable_url(url),
+                    len(content),
+                    MIN_CONTENT_LENGTH
+                )
             
             duration_ms = int((time.time() - start_time) * 1000)
+            logger.info(
+                "Extraction completed url=%s duration_ms=%s entities=%s content_len=%s warnings=%s",
+                self._loggable_url(url),
+                duration_ms,
+                len(entities),
+                len(content),
+                len(errors)
+            )
             
             # Build response
             return {
@@ -244,6 +279,14 @@ class WebExtractionAgent:
         start_time = time.time()
         errors = []
         warnings = []
+        logger.info(
+            "Starting keyword extraction url=%s keyword_count=%s keyword_preview=%s raw_html_supplied=%s use_llm=%s",
+            self._loggable_url(url),
+            len(keywords),
+            self._keyword_preview(keywords),
+            bool(raw_html),
+            use_llm
+        )
         
         try:
             # Validate input
@@ -277,7 +320,9 @@ class WebExtractionAgent:
             # Check if we got valid content
             if not content or len(content) < 50:
                 warnings.append("Extracted content is too short or empty - possible encoding issue")
-                logger.warning(f"Content too short ({len(content)} chars) for {url}")
+                logger.warning("Content too short (%s chars) for %s", len(content), self._loggable_url(url))
+            else:
+                logger.debug("Parsed content for keyword extraction (%s chars)", len(content))
             
             # Keyword-based extraction with quality tracking
             extract_start = time.time()
@@ -302,6 +347,14 @@ class WebExtractionAgent:
             )
             
             duration_ms = int((time.time() - start_time) * 1000)
+            logger.info(
+                "Keyword extraction completed url=%s duration_ms=%s matches=%s relevance=%.3f llm_used=%s",
+                self._loggable_url(url),
+                duration_ms,
+                keyword_results.get("total_matches", 0),
+                keyword_results.get("relevance_score", 0.0),
+                use_llm and self.llm_keyword_extractor is not None
+            )
             
             # Build comprehensive response with quality scores
             result = {
@@ -445,7 +498,7 @@ class WebExtractionAgent:
             
             if not content or len(content) < 50:
                 warnings.append("Extracted content is too short or empty")
-                logger.warning(f"Content too short ({len(content)} chars) for {url}")
+                logger.warning("Content too short (%s chars) for %s", len(content), self._loggable_url(url))
             
             # Semantic extraction using LLM
             extract_start = time.time()
@@ -594,6 +647,22 @@ class WebExtractionAgent:
                 }
             }
     
+
+    @staticmethod
+    def _loggable_url(url: str) -> str:
+        """Return a URL safe for logs by removing query params and fragments."""
+        try:
+            parsed = urlparse(url)
+            return urlunparse((parsed.scheme, parsed.netloc, parsed.path, '', '', ''))
+        except Exception:
+            return url
+
+    @staticmethod
+    def _keyword_preview(keywords: List[str], max_items: int = 3) -> List[str]:
+        """Return a short keyword preview for logging without dumping full user input."""
+        preview = [k for k in keywords[:max_items] if isinstance(k, str)]
+        return preview
+
     def _fetch_html(self, url: str) -> str:
         """
         Safely fetch HTML from URL with proper encoding handling.
@@ -608,7 +677,8 @@ class WebExtractionAgent:
             RequestException: If fetch fails
         """
         try:
-            logger.debug(f"Fetching URL: {url}")
+            fetch_start = time.time()
+            logger.debug("Fetching URL: %s", self._loggable_url(url))
             
             # Validate URL
             parsed = urlparse(url)
@@ -622,6 +692,15 @@ class WebExtractionAgent:
                 verify=True
             )
             response.raise_for_status()
+            elapsed_ms = int((time.time() - fetch_start) * 1000)
+            logger.info(
+                "Fetched URL successfully url=%s final_url=%s status=%s bytes=%s elapsed_ms=%s",
+                self._loggable_url(url),
+                self._loggable_url(response.url),
+                response.status_code,
+                len(response.content),
+                elapsed_ms
+            )
             
             # Check content size
             if len(response.content) > MAX_CONTENT_SIZE:
